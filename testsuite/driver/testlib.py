@@ -17,6 +17,7 @@ from math import ceil, trunc
 from pathlib import PurePath
 import collections
 import subprocess
+import signal
 
 from testglobals import config, ghc_env, default_testopts, brokens, t
 from testutil import strip_quotes, lndir, link_or_copy_file
@@ -1802,8 +1803,7 @@ def dump_file(f):
 
 def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, print_output=0):
     timeout_prog = strip_quotes(config.timeout_prog)
-    timeout = str(int(ceil(config.timeout * timeout_multiplier)))
-
+    timeout = int(ceil(config.timeout * timeout_multiplier))
     # Format cmd using config. Example: cmd='{hpc} report A.tix'
     cmd = cmd.format(**config.__dict__)
     if_verbose(3, cmd + ('< ' + os.path.basename(stdin) if stdin else ''))
@@ -1822,13 +1822,23 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
         # Hence it must ultimately be run by a Bourne shell. It's timeout's job
         # to invoke the Bourne shell
 
-        r = subprocess.Popen([timeout_prog, timeout, cmd],
+        r = subprocess.Popen(cmd, 
+                             shell=True, 
+                             start_new_session=True,
                              stdin=stdin_file,
                              stdout=subprocess.PIPE,
                              stderr=hStdErr,
                              env=ghc_env)
 
+        stdout_buffer, stderr_buffer = r.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(r.pid, signal.SIGKILL)
         stdout_buffer, stderr_buffer = r.communicate()
+        if_verbose(1,'Timeout happened...killed process "{0}"...\n'.format(cmd))
+        r.returncode = 99
+    except KeyboardInterrupt:
+        stopNow()
+        r.returncode = 98
     finally:
         if stdin_file:
             stdin_file.close()
@@ -1846,12 +1856,6 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
                 with io.open(stderr, 'wb') as f:
                     f.write(stderr_buffer)
 
-    if r.returncode == 98:
-        # The python timeout program uses 98 to signal that ^C was pressed
-        stopNow()
-    if r.returncode == 99 and getTestOpts().exit_code != 99:
-        # Only print a message when timeout killed the process unexpectedly.
-        if_verbose(1, 'Timeout happened...killed process "{0}"...\n'.format(cmd))
     return r.returncode
 
 # -----------------------------------------------------------------------------
