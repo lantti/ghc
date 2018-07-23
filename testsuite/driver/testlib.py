@@ -1842,7 +1842,39 @@ def processWindows(cmd, stdin_file, timeout, combine_output):
     return 99, b'', b''
 
 def processPosix(cmd, stdin_file, timeout, combine_output):
-    return 99, b'', b''
+
+    if combine_output:
+        hStdErr = subprocess.STDOUT
+    else:
+        hStdErr = subprocess.PIPE
+
+    stdout_buffer = b''
+    stderr_buffer = b''
+
+    try:
+        # cmd is a complex command in Bourne-shell syntax
+        # e.g (cd . && 'C:/users/simonpj/HEAD/inplace/bin/ghc-stage2' ...etc)
+        # Hence it must ultimately be run by a Bourne shell. It's timeout's job
+        # to invoke the Bourne shell
+
+        r = subprocess.Popen(cmd,
+                             shell=True,
+                             start_new_session=True,
+                             stdin=stdin_file,
+                             stdout=subprocess.PIPE,
+                             stderr=hStdErr,
+                             env=ghc_env)
+
+        stdout_buffer, stderr_buffer = r.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(r.pid, signal.SIGKILL)
+        stdout_buffer, stderr_buffer = r.communicate()
+        if_verbose(1,'Timeout happened...killed process "{0}"...\n'.format(cmd))
+        return 99, stdout_buffer, stderr_buffer
+    except KeyboardInterrupt:
+        stopNow()
+        return 98, stdout_buffer, stderr_buffer
+    return r.returncode, stdout_buffer, stderr_buffer
 
 # -----------------------------------------------------------------------------
 # checking if ghostscript is available for checking the output of hp2ps
