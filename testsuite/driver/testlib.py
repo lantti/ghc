@@ -21,6 +21,10 @@ import signal
 
 from testglobals import config, ghc_env, default_testopts, brokens, t
 from testutil import strip_quotes, lndir, link_or_copy_file
+
+if config.msys:
+    import winbindings
+
 extra_src_files = {'T4198': ['exitminus1.c']} # TODO: See #12223
 
 global pool_sema
@@ -1839,7 +1843,73 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0,
     return returncode
 
 def processWindows(cmd, stdin_file, timeout, combine_output):
-    return 99, b'', b''
+    outbuffer = io.BytesIO()
+    errbuffer = io.BytesIO()
+
+    hP = winbindings.INVALID_HANDLE_VALUE
+    hT = winbindings.INVALID_HANDLE_VALUE
+    jObj = winbindings.INVALID_HANDLE_VALUE
+    cPort = winbindings.INVALID_HANDLE_VALUE
+    inpipeW = winbindings.INVALID_HANDLE_VALUE
+    outpipeR = winbindings.INVALID_HANDLE_VALUE
+    errpipeR = winbindings.INVALID_HANDLE_VALUE
+    inWriter = None
+    outReader = None
+    errReader = None
+    
+    exitcode = 99
+
+    escapes = str.maketrans({'\\': '\\\\', '"': '\\\"'})  
+    cmdLine = "sh -c \"" + cmd.translate(escapes) + "\""
+
+    try:
+        hP, hT, jObj, cPort, inpipeW, outpipeR, errpipeR = \
+                winbindings.newJobWithRedirectedIo(cmdLine, env=ghc_env,
+                        combine_output=combine_output)
+
+        outReader = threading.Thread(target=winbindings.readWinPipe,
+                args=(outpipeR, outbuffer))
+        outReader.start()
+        if stdin_file:
+            inWriter = threading.Thread(target=winbindings.writeWinPipe,
+                    args=(inpipeW, stdin_file))
+            inWriter.start()
+        if not combine_output:
+            errReader = threading.Thread(target=winbindings.readWinPipe,
+                    args=(errpipeR, errbuffer))
+            errReader.start()
+
+        if not winbindings.waitForZeroActiveProcesses(cPort, timeout):
+            if_verbose(1,
+                    'Timeout happened...killed process "{0}"...\n'.format(cmd))
+            return 99, outbuffer.getvalue(), errbuffer.getvalue()  
+        
+        exitcode = winbindings.getExitCodeProcess(hP)
+
+    finally:
+        if hP != winbindings.INVALID_HANDLE_VALUE:
+            winbindings.closeHandle(hP)
+        if hT != winbindings.INVALID_HANDLE_VALUE:
+            winbindings.closeHandle(hT)
+        if cPort != winbindings.INVALID_HANDLE_VALUE:
+            winbindings.closeHandle(cPort)
+        if jObj != winbindings.INVALID_HANDLE_VALUE:
+            winbindings.terminateJobObject(jObj, exitcode)
+            winbindings.closeHandle(jObj)
+        if inpipeW != winbindings.INVALID_HANDLE_VALUE:
+            winbindings.closeHandle(inpipeW)
+        if outpipeR != winbindings.INVALID_HANDLE_VALUE:
+            winbindings.closeHandle(outpipeR)
+        if errpipeR != winbindings.INVALID_HANDLE_VALUE:            
+            winbindings.closeHandle(errpipeR)
+        if inWriter != None:
+            inWriter.join()
+        if outReader != None:
+            outReader.join()
+        if errReader != None:
+            errReader.join()
+
+    return exitcode, outbuffer.getvalue(), errbuffer.getvalue()
 
 def processPosix(cmd, stdin_file, timeout, combine_output):
 
