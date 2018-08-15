@@ -1801,14 +1801,29 @@ def dump_file(f):
     except Exception:
         print('')
 
+def abortCmd(pid):
+    # There is no easy support for Windows Job Objects in python subprocess
+    # module, so we use an external program instead when terminating a task.
+    # Submodule supports Posix process groups so there we have easier time.
+    if msys():
+        cp = subprocess.run("taskkill /f /t /pid " + str(pid),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if cp.returncode != 0:
+            framework_fail(name, way, 'error while aborting task ' + str(pid))
+    else:
+        os.killpg(pid, signal.SIGKILL)
+        
+
 def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, print_output=0):
     timeout_prog = strip_quotes(config.timeout_prog)
-    timeout = int(ceil(config.timeout * timeout_multiplier))
+    timeout = ceil(config.timeout * timeout_multiplier)
+    # Unfortunately process groups are a Posix-only feature
+    start_new_session = not msys()
     # Format cmd using config. Example: cmd='{hpc} report A.tix'
     cmd = cmd.format(**config.__dict__)
+    returncode = 1
     if_verbose(3, cmd + ('< ' + os.path.basename(stdin) if stdin else ''))
 
-    stdin_file = io.open(stdin, 'rb') if stdin else None
     stdout_buffer = b''
     stderr_buffer = b''
 
@@ -1817,28 +1832,33 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
         hStdErr = subprocess.STDOUT
 
     try:
+        stdin_file = io.open(stdin, 'rb') if stdin else None
+
         # cmd is a complex command in Bourne-shell syntax
         # e.g (cd . && 'C:/users/simonpj/HEAD/inplace/bin/ghc-stage2' ...etc)
         # Hence it must ultimately be run by a Bourne shell. It's timeout's job
         # to invoke the Bourne shell
 
-        r = subprocess.Popen(cmd, 
-                             shell=True, 
-                             start_new_session=True,
+        r = subprocess.Popen(['sh', '-c', cmd], 
+                             start_new_session=start_new_session,
                              stdin=stdin_file,
                              stdout=subprocess.PIPE,
                              stderr=hStdErr,
                              env=ghc_env)
 
         stdout_buffer, stderr_buffer = r.communicate(timeout=timeout)
+        returncode = r.returncode
     except subprocess.TimeoutExpired:
-        os.killpg(r.pid, signal.SIGKILL)
+        abortCmd(r.pid)
         stdout_buffer, stderr_buffer = r.communicate()
         if_verbose(1,'Timeout happened...killed process "{0}"...\n'.format(cmd))
-        r.returncode = 99
+        returncode = 99
     except KeyboardInterrupt:
         stopNow()
-        r.returncode = 98
+        if r:
+            abortCmd(r.pid)
+            stdout_buffer, stderr_buffer = r.communicate()
+            returncode = 98
     finally:
         if stdin_file:
             stdin_file.close()
@@ -1856,7 +1876,7 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
                 with io.open(stderr, 'wb') as f:
                     f.write(stderr_buffer)
 
-    return r.returncode
+    return returncode
 
 # -----------------------------------------------------------------------------
 # checking if ghostscript is available for checking the output of hp2ps
