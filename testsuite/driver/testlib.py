@@ -1801,14 +1801,17 @@ def dump_file(f):
     except Exception:
         print('')
 
-def abortCmd(pid):
-    if msys():
-        # signal.CTRL_BREAK_EVENT is special and gets propagated to the whole
-        # Console Process Group if one exists. Note that under mintty this is
-        # normally not the case and the whole thing will be a no-op.
-        os.kill(pid, signal.CTRL_BREAK_EVENT)
-    else:
-        os.killpg(pid, signal.SIGKILL)
+def terminateCmd(pid):
+    try:
+        if msys():
+            # signal.CTRL_BREAK_EVENT is special and gets propagated to the
+            # whole Console Process Group if one exists. Note that under mintty             # this is normally not the case and the whole thing will be a no-op.
+            os.kill(pid, signal.CTRL_BREAK_EVENT)
+        else:
+            os.killpg(pid, signal.SIGKILL)
+    # If the specified process group is empty, then assume all exited normally
+    except ProcessLookupError:
+        pass
         
 
 def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, print_output=0):
@@ -1830,6 +1833,7 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
 
     stdout_buffer = b''
     stderr_buffer = b''
+    r = None
 
     hStdErr = subprocess.PIPE
     if stderr is subprocess.STDOUT:
@@ -1854,17 +1858,18 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
         stdout_buffer, stderr_buffer = r.communicate(timeout=timeout)
         returncode = r.returncode
     except subprocess.TimeoutExpired:
-        abortCmd(r.pid)
+        terminateCmd(r.pid)
         stdout_buffer, stderr_buffer = r.communicate()
         if_verbose(1,'Timeout happened...killed process "{0}"...\n'.format(cmd))
         returncode = 99
     except KeyboardInterrupt:
         stopNow()
         if r:
-            abortCmd(r.pid)
-            stdout_buffer, stderr_buffer = r.communicate()
-            returncode = 98
+            terminateCmd(r.pid)
+        returncode = 98
     finally:
+        if r:
+            terminateCmd(r.pid)
         if stdin_file:
             stdin_file.close()
         if config.verbose >= 1 and print_output >= 1:
