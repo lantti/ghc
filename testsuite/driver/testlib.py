@@ -23,6 +23,7 @@ from testglobals import config, ghc_env, default_testopts, brokens, t
 from testutil import strip_quotes, lndir, link_or_copy_file
 
 if config.msys:
+    import threading
     import winbindings
 
 extra_src_files = {'T4198': ['exitminus1.c']} # TODO: See #12223
