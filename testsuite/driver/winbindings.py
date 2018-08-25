@@ -1,3 +1,5 @@
+import io
+import threading
 from ctypes import *
 from ctypes.wintypes import *
 
@@ -358,4 +360,80 @@ def waitForZeroActiveProcesses(completionPort, timeout, interval=1000):
         nB, cKey, oL = getQueuedCompletionStatus(CompletionPort=completionPort,
                 dwMilliseconds=interval)
     return nB == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO
+
+class TimeoutExpired(Exception):
+    def __init__(self, cmd, timeout, stdout, stderr):
+        self.cmd = cmd
+        self.timeout = timeout
+        self.stdout = stdout
+        self.output = self.stdout
+        self.stderr = stderr
+
+def runJob(cmd, env, stdin_file, timeout, combine_output):
+    outbuffer = io.BytesIO()
+    errbuffer = io.BytesIO()
+
+    hP = INVALID_HANDLE_VALUE
+    hT = INVALID_HANDLE_VALUE
+    jObj = INVALID_HANDLE_VALUE
+    cPort = INVALID_HANDLE_VALUE
+    inpipeW = INVALID_HANDLE_VALUE
+    outpipeR = INVALID_HANDLE_VALUE
+    errpipeR = INVALID_HANDLE_VALUE
+    inWriter = None
+    outReader = None
+    errReader = None
+    
+    exitcode = 99
+
+    escapes = str.maketrans({'\\': '\\\\', '"': '\\\"'})  
+    cmdLine = "sh -c \"" + cmd.translate(escapes) + "\""
+
+    try:
+        hP, hT, jObj, cPort, inpipeW, outpipeR, errpipeR = \
+                newJobWithRedirectedIo(cmdLine, env=env,
+                        combine_output=combine_output)
+
+        outReader = threading.Thread(target=readWinPipe,
+                args=(outpipeR, outbuffer))
+        outReader.start()
+        if stdin_file:
+            inWriter = threading.Thread(target=writeWinPipe,
+                    args=(inpipeW, stdin_file))
+            inWriter.start()
+        if not combine_output:
+            errReader = threading.Thread(target=readWinPipe,
+                    args=(errpipeR, errbuffer))
+            errReader.start()
+
+        if not waitForZeroActiveProcesses(cPort, timeout):
+            raise TimeoutExpired(cmd, timeout, outbuffer.getvalue(),
+                    errbuffer.getvalue())  
+        
+        exitcode = getExitCodeProcess(hP)
+
+    finally:
+        if hP != INVALID_HANDLE_VALUE:
+            closeHandle(hP)
+        if hT != INVALID_HANDLE_VALUE:
+            closeHandle(hT)
+        if cPort != INVALID_HANDLE_VALUE:
+            closeHandle(cPort)
+        if jObj != INVALID_HANDLE_VALUE:
+            terminateJobObject(jObj, exitcode)
+            closeHandle(jObj)
+        if inpipeW != INVALID_HANDLE_VALUE:
+            closeHandle(inpipeW)
+        if outpipeR != INVALID_HANDLE_VALUE:
+            closeHandle(outpipeR)
+        if errpipeR != INVALID_HANDLE_VALUE:            
+            closeHandle(errpipeR)
+        if inWriter != None:
+            inWriter.join()
+        if outReader != None:
+            outReader.join()
+        if errReader != None:
+            errReader.join()
+
+    return exitcode, outbuffer.getvalue(), errbuffer.getvalue()
 
