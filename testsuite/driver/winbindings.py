@@ -384,6 +384,7 @@ def runJob(cmd, env, stdin_file, timeout, combine_output):
     outReader = None
     errReader = None
     
+    elapsed = 0
     exitcode = 99
 
     escapes = str.maketrans({'\\': '\\\\', '"': '\\\"'})  
@@ -397,16 +398,28 @@ def runJob(cmd, env, stdin_file, timeout, combine_output):
         outReader = threading.Thread(target=readWinPipe,
                 args=(outpipeR, outbuffer))
         outReader.start()
-        if stdin_file:
-            inWriter = threading.Thread(target=writeWinPipe,
-                    args=(inpipeW, stdin_file))
-            inWriter.start()
+
         if not combine_output:
             errReader = threading.Thread(target=readWinPipe,
                     args=(errpipeR, errbuffer))
             errReader.start()
 
-        if not waitForZeroActiveProcesses(cPort, timeout):
+        if stdin_file:
+            inWriter = threading.Thread(target=writeWinPipe,
+                    args=(inpipeW, stdin_file))
+            inWriter.start()
+            while inWriter.is_alive():
+                if elapsed < timeout:
+                    inWriter.join(1)
+                    elapsed += 1
+                else:
+                    raise TimeoutExpired(cmd, timeout, outbuffer.getvalue(),
+                            errbuffer.getvalue())
+            closeHandle(inpipeW)
+            inpipeW = INVALID_HANDLE_VALUE
+            inWriter = None
+
+        if not waitForZeroActiveProcesses(cPort, timeout - elapsed):
             raise TimeoutExpired(cmd, timeout, outbuffer.getvalue(),
                     errbuffer.getvalue())  
         
